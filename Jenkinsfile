@@ -74,8 +74,8 @@ pipeline
             agent { label 'CYBR3120-01-app-server'}
 
             steps
-            echo 'Starting deployment using docker-compose...'
             {
+                echo 'Starting deployment using docker-compose...'
                 script
                 {
                   dir("${WORKSPACE}")
@@ -88,8 +88,8 @@ pipeline
                   }
 
                 }
-            }
-            echo 'Deployment completed successfully!'
+                echo 'Deployment completed successfully!'
+            }   
         }
     }
 }
