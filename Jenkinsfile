@@ -33,7 +33,7 @@ pipeline {
 
         stage('SonarQube Analysis') {
             agent {
-                label ''
+                label 'CYBR3120-01-app-server'
             }
             steps {
                 script {
