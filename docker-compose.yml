@@ -3,7 +3,7 @@ services:
   gameapptestauto:
     image: amalan06/amalangametest123:latest
     build: .
-    container_name: gameapptestauto01
+    container_name: gameapptestauto0101
     ports:
       - "80:3000"
     environment:
