@@ -30,14 +30,15 @@ pipeline {
                 }
             }
         }
-    stage('SonarQube Analysis') {
+
+        stage('SonarQube Analysis') {
             agent {
-                label 'CYBR3120-01-app-server'
+                label ''
             }
             steps {
                 script {
-                    def scannerHome = tool 'sonarqube'
-                    withSonarQubeEnv('sonarqube') {
+                    def scannerHome = tool 'SonarQube-Scanner'
+                    withSonarQubeEnv('SonarQube-installations') {
                         sh "${scannerHome}/bin/sonar-scanner \
                             -Dsonar.projectKey=gameapp \
                             -Dsonar.sources=."
@@ -45,6 +46,7 @@ pipeline {
                 }
             }
         }
+ 
         
 
       stage('BUILD-AND-TAG') {
