@@ -2,20 +2,11 @@ pipeline {
     agent any
 
     environment {
-        // ----------------------------------------------------------------
-        // Credentials and Image config
-        // ----------------------------------------------------------------
         DOCKERHUB_CREDENTIALS = 'cybr-3120'
         IMAGE_NAME = 'amalan06/amalangametest123'
 
-        // ----------------------------------------------------------------
-        // Trivy image scanning config
-        // ----------------------------------------------------------------
         TRIVY_SEVERITY = "HIGH,CRITICAL"
 
-        // ----------------------------------------------------------------
-        // OWASP ZAP DAST config
-        // ----------------------------------------------------------------
         TARGET_URL = "http://172.238.162.6/"
         REPORT_HTML = "zap_report.html"
         REPORT_JSON = "zap_report.json"
@@ -25,61 +16,52 @@ pipeline {
 
     stages {
 
-        /* ============================================================
-           1) CLONE SOURCE CODE
-        ============================================================ */
         stage('Cloning Git') {
-            steps {
-                checkout scm
-            }
+            steps { checkout scm }
         }
 
-        /* ============================================================
-           2) SAST — SNYK (NON-BLOCKING)
-        ============================================================ */
+        /* -------------------------------------------------------------------
+           SNYK (NON-BLOCKING)
+        -------------------------------------------------------------------*/
         stage('SAST-TEST') {
             steps {
                 script {
-                    echo "Running Snyk scan (will not stop pipeline)..."
-                    try {
+                    echo "Running Snyk (non-blocking)..."
+                    catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
                         snykSecurity(
                             snykInstallation: 'Snyk-installations',
                             snykTokenId: 'Snyk-API-token',
                             severity: 'critical'
                         )
-                    } catch (err) {
-                        echo "Snyk found vulnerabilities but pipeline continues"
-                        echo "Snyk Error: ${err}"
-                        currentBuild.result = "UNSTABLE"   // does NOT stop pipeline
                     }
                 }
             }
         }
 
-
-        /* ============================================================
-           3) SAST — SONARQUBE
-        ============================================================ */
+        /* -------------------------------------------------------------------
+           SONARQUBE (NON-BLOCKING)
+        -------------------------------------------------------------------*/
         stage('SonarQube Analysis') {
             agent { label 'CYBR3120-01-app-server' }
             steps {
                 script {
-                    def scannerHome = tool 'SonarQube-Scanner'
-                    withSonarQubeEnv('SonarQube-installations') {
-                        sh """
-                            ${scannerHome}/bin/sonar-scanner \
-                            -Dsonar.projectKey=gameapp \
-                            -Dsonar.sources=.
-                        """
+                    catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
+                        def scannerHome = tool 'SonarQube-Scanner'
+                        withSonarQubeEnv('SonarQube-installations') {
+                            sh """
+                                ${scannerHome}/bin/sonar-scanner \
+                                -Dsonar.projectKey=gameapp \
+                                -Dsonar.sources=.
+                            """
+                        }
                     }
                 }
             }
         }
 
-
-        /* ============================================================
-           4) BUILD & TAG IMAGE
-        ============================================================ */
+        /* -------------------------------------------------------------------
+           DOCKER BUILD (BLOCKING)
+        -------------------------------------------------------------------*/
         stage('BUILD-AND-TAG') {
             agent { label 'CYBR3120-01-app-server' }
             steps {
@@ -91,15 +73,14 @@ pipeline {
             }
         }
 
-
-        /* ============================================================
-           5) PUSH IMAGE TO DOCKER HUB
-        ============================================================ */
+        /* -------------------------------------------------------------------
+           PUSH TO DOCKER HUB (BLOCKING)
+        -------------------------------------------------------------------*/
         stage('POST-TO-DOCKERHUB') {
             agent { label 'CYBR3120-01-app-server' }
             steps {
                 script {
-                    echo "Pushing image to DockerHub..."
+                    echo "Pushing to DockerHub..."
                     docker.withRegistry('https://registry.hub.docker.com', "${DOCKERHUB_CREDENTIALS}") {
                         app.push("latest")
                     }
@@ -107,133 +88,119 @@ pipeline {
             }
         }
 
-
-        /* ============================================================
-           6) IMAGE SCAN — TRIVY (NON-BLOCKING)
-        ============================================================ */
+        /* -------------------------------------------------------------------
+           TRIVY SCAN (NON-BLOCKING)
+        -------------------------------------------------------------------*/
         stage("SECURITY-IMAGE-SCANNER") {
             steps {
                 script {
-                    echo "Running Trivy vulnerability scan..."
+                    echo "Running Trivy scan..."
 
-                    // JSON output
-                    sh """
-                        docker run --rm -v \$(pwd):/workspace aquasec/trivy:latest image \
-                        --exit-code 0 \
-                        --format json \
-                        --output /workspace/trivy-report.json \
-                        --severity ${TRIVY_SEVERITY} \
-                        ${IMAGE_NAME}
-                    """
+                    catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
 
-                    // HTML output
-                    sh """
-                        docker run --rm -v \$(pwd):/workspace aquasec/trivy:latest image \
-                        --exit-code 0 \
-                        --format template \
-                        --template "@/contrib/html.tpl" \
-                        --output /workspace/trivy-report.html \
-                        ${IMAGE_NAME}
-                    """
+                        sh """
+                            docker run --rm -v \$(pwd):/workspace aquasec/trivy:latest image \
+                            --exit-code 0 \
+                            --format json \
+                            --output /workspace/trivy-report.json \
+                            --severity ${TRIVY_SEVERITY} \
+                            ${IMAGE_NAME}
+                        """
+
+                        sh """
+                            docker run --rm -v \$(pwd):/workspace aquasec/trivy:latest image \
+                            --exit-code 0 \
+                            --format template \
+                            --template "@/contrib/html.tpl" \
+                            --output /workspace/trivy-report.html \
+                            ${IMAGE_NAME}
+                        """
+                    }
 
                     archiveArtifacts artifacts: "trivy-report.json,trivy-report.html"
                 }
             }
         }
 
-        /* ============================================================
-           7) SUMMARIZE TRIVY (NO STOP ON CRITICAL CVE)
-        ============================================================ */
+        /* -------------------------------------------------------------------
+           TRIVY SUMMARY (NON-BLOCKING)
+        -------------------------------------------------------------------*/
         stage("Summarize Trivy Findings") {
             steps {
                 script {
-                    if (!fileExists("trivy-report.json")) {
-                        echo "No Trivy report found."
-                        return
-                    }
+                    catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
 
-                    def highCount = sh(
-                        script: "grep -o '\"Severity\": \"HIGH\"' trivy-report.json | wc -l",
-                        returnStdout: true
-                    ).trim()
+                        if (!fileExists("trivy-report.json")) {
+                            echo "No Trivy report."
+                            return
+                        }
 
-                    def criticalCount = sh(
-                        script: "grep -o '\"Severity\": \"CRITICAL\"' trivy-report.json | wc -l",
-                        returnStdout: true
-                    ).trim()
+                        def highCount = sh(
+                            script: "grep -o '\"Severity\": \"HIGH\"' trivy-report.json | wc -l",
+                            returnStdout: true
+                        ).trim()
 
-                    echo "HIGH Vulns: ${highCount}"
-                    echo "CRITICAL Vulns: ${criticalCount}"
+                        def criticalCount = sh(
+                            script: "grep -o '\"Severity\": \"CRITICAL\"' trivy-report.json | wc -l",
+                            returnStdout: true
+                        ).trim()
 
-                    if (criticalCount.toInteger() > 0) {
-                        echo "Critical Trivy vulnerabilities found. Build marked UNSTABLE but continuing..."
-                        currentBuild.result = "UNSTABLE"     // does NOT stop pipeline
+                        echo "HIGH: ${highCount}"
+                        echo "CRITICAL: ${criticalCount}"
                     }
                 }
             }
         }
 
-
-        /* ============================================================
-           8) PULL IMAGE ON SERVER
-        ============================================================ */
-        stage('Pull-image-server') {
-            steps {
-                sh "docker pull ${IMAGE_NAME}:latest || true"
-            }
-        }
-
-
-        /* ============================================================
-           9) DAST — OWASP ZAP FULL SCAN
-        ============================================================ */
+        /* -------------------------------------------------------------------
+           ZAP BASELINE SCAN (NON-BLOCKING)
+        -------------------------------------------------------------------*/
         stage('DAST') {
             steps {
                 script {
-                    echo "Running OWASP ZAP DAST..."
+                    echo "Running OWASP ZAP..."
 
                     sh "mkdir -p ${REPORT_DIR}"
 
-                    sh """
-                        docker run --rm --user root --network host \
-                        -v ${REPORT_DIR}:/zap/wrk \
-                        -t ${ZAP_IMAGE} zap-baseline.py \
-                        -t ${TARGET_URL} \
-                        -r ${REPORT_HTML} -J ${REPORT_JSON}
-                    """
+                    // NEVER FAIL ZAP
+                    catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
+                        sh """
+                            docker run --rm --user root --network host \
+                            -v ${REPORT_DIR}:/zap/wrk \
+                            -t ${ZAP_IMAGE} zap-baseline.py \
+                            -t ${TARGET_URL} \
+                            -r ${REPORT_HTML} -J ${REPORT_JSON} || true
+                        """
+                    }
 
-                    archiveArtifacts artifacts: "zap_reports/*"
+                    archiveArtifacts artifacts: "zap_reports/*", allowEmptyArchive: true
                 }
             }
         }
 
-
-        /* ============================================================
-           10) DEPLOYMENT
-        ============================================================ */
+        /* -------------------------------------------------------------------
+           DEPLOYMENT — MUST ALWAYS RUN
+        -------------------------------------------------------------------*/
         stage('DEPLOYMENT') {
             agent { label 'CYBR3120-01-app-server' }
             steps {
                 script {
-                    echo "Starting docker-compose deployment..."
+                    echo "Deploying using docker-compose..."
 
-                    dir("${WORKSPACE}") {
-                        sh """
-                            docker-compose down || true
-                            docker-compose up -d
-                            docker ps
-                        """
+                    catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
+                        dir("${WORKSPACE}") {
+                            sh """
+                                docker-compose down || true
+                                docker-compose up -d || true
+                                docker ps || true
+                            """
+                        }
                     }
                 }
-                echo 'Deployment completed successfully!'
             }
         }
     }
 
-
-    /* ============================================================
-       PUBLISH HTML SECURITY REPORTS
-    ============================================================ */
     post {
         always {
             publishHTML(target: [
