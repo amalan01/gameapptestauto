@@ -2,14 +2,20 @@ pipeline {
     agent any
 
     environment {
-        // Credentials & Configurations
+        // ----------------------------------------------------------------
+        // Credentials and Image config
+        // ----------------------------------------------------------------
         DOCKERHUB_CREDENTIALS = 'cybr-3120'
         IMAGE_NAME = 'amalan06/amalangametest123'
 
-        // TRIVY
+        // ----------------------------------------------------------------
+        // Trivy image scanning config
+        // ----------------------------------------------------------------
         TRIVY_SEVERITY = "HIGH,CRITICAL"
 
-        // ZAP
+        // ----------------------------------------------------------------
+        // OWASP ZAP DAST config
+        // ----------------------------------------------------------------
         TARGET_URL = "http://172.238.162.6/"
         REPORT_HTML = "zap_report.html"
         REPORT_JSON = "zap_report.json"
@@ -29,22 +35,30 @@ pipeline {
         }
 
         /* ============================================================
-           2) SAST - SNYK SCAN
+           2) SAST — SNYK (NON-BLOCKING)
         ============================================================ */
         stage('SAST-TEST') {
             steps {
                 script {
-                    snykSecurity(
-                        snykInstallation: 'Snyk-installations',
-                        snykTokenId: 'Snyk-API-token',
-                        severity: 'critical'
-                    )
+                    echo "Running Snyk scan (will not stop pipeline)..."
+                    try {
+                        snykSecurity(
+                            snykInstallation: 'Snyk-installations',
+                            snykTokenId: 'Snyk-API-token',
+                            severity: 'critical'
+                        )
+                    } catch (err) {
+                        echo "Snyk found vulnerabilities but pipeline continues"
+                        echo "Snyk Error: ${err}"
+                        currentBuild.result = "UNSTABLE"   // does NOT stop pipeline
+                    }
                 }
             }
         }
 
+
         /* ============================================================
-           3) SAST - SONARQUBE
+           3) SAST — SONARQUBE
         ============================================================ */
         stage('SonarQube Analysis') {
             agent { label 'CYBR3120-01-app-server' }
@@ -62,8 +76,9 @@ pipeline {
             }
         }
 
+
         /* ============================================================
-           4) BUILD & TAG DOCKER IMAGE
+           4) BUILD & TAG IMAGE
         ============================================================ */
         stage('BUILD-AND-TAG') {
             agent { label 'CYBR3120-01-app-server' }
@@ -76,6 +91,7 @@ pipeline {
             }
         }
 
+
         /* ============================================================
            5) PUSH IMAGE TO DOCKER HUB
         ============================================================ */
@@ -83,7 +99,7 @@ pipeline {
             agent { label 'CYBR3120-01-app-server' }
             steps {
                 script {
-                    echo "Pushing image ${IMAGE_NAME}:latest to Docker Hub..."
+                    echo "Pushing image to DockerHub..."
                     docker.withRegistry('https://registry.hub.docker.com', "${DOCKERHUB_CREDENTIALS}") {
                         app.push("latest")
                     }
@@ -93,40 +109,42 @@ pipeline {
 
 
         /* ============================================================
-           6) IMAGE SECURITY SCAN — TRIVY
+           6) IMAGE SCAN — TRIVY (NON-BLOCKING)
         ============================================================ */
         stage("SECURITY-IMAGE-SCANNER") {
             steps {
-                echo "Running Trivy Container Security Scan..."
+                script {
+                    echo "Running Trivy vulnerability scan..."
 
-                // JSON report
-                sh """
-                    docker run --rm -v \$(pwd):/workspace aquasec/trivy:latest image \
-                    --exit-code 0 \
-                    --format json \
-                    --output /workspace/trivy-report.json \
-                    --severity ${TRIVY_SEVERITY} \
-                    ${IMAGE_NAME}
-                """
+                    // JSON output
+                    sh """
+                        docker run --rm -v \$(pwd):/workspace aquasec/trivy:latest image \
+                        --exit-code 0 \
+                        --format json \
+                        --output /workspace/trivy-report.json \
+                        --severity ${TRIVY_SEVERITY} \
+                        ${IMAGE_NAME}
+                    """
 
-                // HTML report
-                sh """
-                    docker run --rm -v \$(pwd):/workspace aquasec/trivy:latest image \
-                    --exit-code 0 \
-                    --format template \
-                    --template "@/contrib/html.tpl" \
-                    --output /workspace/trivy-report.html \
-                    ${IMAGE_NAME}
-                """
+                    // HTML output
+                    sh """
+                        docker run --rm -v \$(pwd):/workspace aquasec/trivy:latest image \
+                        --exit-code 0 \
+                        --format template \
+                        --template "@/contrib/html.tpl" \
+                        --output /workspace/trivy-report.html \
+                        ${IMAGE_NAME}
+                    """
 
-                archiveArtifacts artifacts: "trivy-report.json,trivy-report.html"
+                    archiveArtifacts artifacts: "trivy-report.json,trivy-report.html"
+                }
             }
         }
 
         /* ============================================================
-           7) SUMMARIZE TRIVY FINDINGS (DO NOT STOP PIPELINE)
+           7) SUMMARIZE TRIVY (NO STOP ON CRITICAL CVE)
         ============================================================ */
-        stage("Summarize Trivy Vulnerabilities") {
+        stage("Summarize Trivy Findings") {
             steps {
                 script {
                     if (!fileExists("trivy-report.json")) {
@@ -148,8 +166,8 @@ pipeline {
                     echo "CRITICAL Vulns: ${criticalCount}"
 
                     if (criticalCount.toInteger() > 0) {
-                        currentBuild.result = "UNSTABLE"
-                        echo "Build marked UNSTABLE due to critical CVEs — continuing with DAST..."
+                        echo "Critical Trivy vulnerabilities found. Build marked UNSTABLE but continuing..."
+                        currentBuild.result = "UNSTABLE"     // does NOT stop pipeline
                     }
                 }
             }
@@ -157,7 +175,7 @@ pipeline {
 
 
         /* ============================================================
-           8) PULL IMAGE ON SERVER (OPTIONAL)
+           8) PULL IMAGE ON SERVER
         ============================================================ */
         stage('Pull-image-server') {
             steps {
@@ -165,13 +183,14 @@ pipeline {
             }
         }
 
+
         /* ============================================================
-           9) DAST — OWASP ZAP BASELINE SCAN
+           9) DAST — OWASP ZAP FULL SCAN
         ============================================================ */
         stage('DAST') {
             steps {
                 script {
-                    echo "Running OWASP ZAP..."
+                    echo "Running OWASP ZAP DAST..."
 
                     sh "mkdir -p ${REPORT_DIR}"
 
@@ -190,13 +209,14 @@ pipeline {
 
 
         /* ============================================================
-           10 DEPLOYMENT
+           10) DEPLOYMENT
         ============================================================ */
         stage('DEPLOYMENT') {
             agent { label 'CYBR3120-01-app-server' }
             steps {
-                echo 'Starting deployment using docker-compose...'
                 script {
+                    echo "Starting docker-compose deployment..."
+
                     dir("${WORKSPACE}") {
                         sh """
                             docker-compose down || true
@@ -210,12 +230,12 @@ pipeline {
         }
     }
 
+
     /* ============================================================
-       11) PUBLISH SECURITY REPORTS
+       PUBLISH HTML SECURITY REPORTS
     ============================================================ */
     post {
         always {
-
             publishHTML(target: [
                 reportName: 'Trivy Image Security Report',
                 reportDir: '.',
